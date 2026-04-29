@@ -1,7 +1,7 @@
 // src/services/auth.js
 export const verifyAuth = async () => {
   try {
-    const response = await fetch('/api/auth/verify', {
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/auth/verify`, {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json'
@@ -20,7 +20,7 @@ export const verifyAuth = async () => {
 
 export const logout = async () => {
   const csrfToken = getCsrfToken();
-  await fetch('/api/auth/logout', {
+  await fetch(`${import.meta.env.VITE_API_URL}/auth/logout`, {
     method: 'POST',
     credentials: 'include',
     headers: {

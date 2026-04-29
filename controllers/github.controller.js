@@ -1,4 +1,5 @@
 const express = require("express");
+const cookie = require("cookie-parser");
 const { generateAccessToken,
   generateRefreshToken } = require("../services/RefreshToken.service");
 const axios = require("axios");
@@ -67,13 +68,13 @@ exports.gitHubCallBack = async (req, res) => {
     //  const { code } = req.query;
     const code = req.query.code;
 
-    if (!code) {
-      return res.status(400).json({ error: "No code provided" });
-    }
+    // if (!code) {
+    //   return res.status(400).json({ error: "No code provided" });
+    // }
 
-    if (!req.session?.code_verifier) {
-      return res.status(400).json({ error: "Missing code_verifier" });
-    }
+    // if (!req.session?.code_verifier) {
+    //   return res.status(400).json({ error: "Missing code_verifier" });
+    // }
 
     const tokenRes = await axios.post(
       "https://github.com/login/oauth/access_token",
@@ -116,8 +117,20 @@ exports.gitHubCallBack = async (req, res) => {
     const jwtAccess = generateAccessToken(user);
     const refresh = await generateRefreshToken(user);
 
+        res.cookie("access_token", jwtAccess, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: false
+      });
+
+      res.cookie("refresh_token", refresh, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: false
+      });
+
     // res.json({ access_token: jwtAccess, refresh_token: refresh });
-    res.redirect(`${process.env.WEB_PORTAL_URL}dashboard`)
+    res.redirect(`${process.env.WEB_PORTAL_URL}/dashboard`)
 
   } catch (error) {
     console.error(error);
@@ -127,6 +140,31 @@ exports.gitHubCallBack = async (req, res) => {
     });
 
   }
+};
+
+
+exports.verifyUser = (req, res) => {
+ try {
+   if (!req.session || !req.session.user) {
+    return res.status(401).json({
+      authenticated: false,
+    });
+  }
+
+  return res.status(200).json({
+    authenticated: true,
+    user: req.session.user,
+  });
+  
+ } catch (error) {
+  console.error(error);
+  res.status(500).json({
+    status: false,
+    error: "Failed to verify user",
+    error_details: error.response?.data || error.message
+  });
+  
+ }
 };
 
 // module.exports = getGitHub;

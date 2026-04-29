@@ -12,12 +12,30 @@ const app = express();
 
 connectDB();
 
-app.use(cors({ origin: process.env.WEB_PORTAL_URL,
+app.use(cors({ 
+              origin: process.env.WEB_PORTAL_URL,
               credentials: true,
               optionsSuccessStatus: 200,
               // methods: ["GET", "POST", "PUT", "DELETE"],
               allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
 }));
+
+// const allowedOrigins = [
+//   "http://localhost:5173"
+// ];
+
+// app.use(cors({
+//   origin: function (origin, callback) {
+//     if (!origin || allowedOrigins.includes(origin)) {
+//       callback(null, true);
+//     } else {
+//       callback(new Error("Not allowed by CORS"));
+//     }
+//   },
+//   credentials: true,
+//   allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
+// }));
+
 app.use(express.json());
 app.use(morgan("dev"));
 app.use(cookie());
