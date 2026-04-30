@@ -63,6 +63,12 @@ app.use("/", require("./routes/gitHub.routes"));
 app.use("/api/auth", require("./routes/device.routes"))
 app.use("/api/v1/auth", require("./routes/device.routes"))
 
+app.use(authLimiter);
+app.use(apiLimiter);
+
+
+
+//
 const getCurrentUser = async (req, res, next) => {
   try {
     if (req.user.id === "000000000000000000000001" || req.user.id === "000000000000000000000002") {
