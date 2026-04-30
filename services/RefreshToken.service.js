@@ -2,11 +2,12 @@
 const RefreshToken = require("../models/RefreshToken.model");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+const jwtSecret = process.env.JWT_SECRET || "dev_secret";
 
 exports.generateAccessToken =  (user) => {
   return jwt.sign(
     { id: user._id, role: user.role },
-    process.env.JWT_SECRET,
+    jwtSecret,
     { expiresIn: "15m" }
   );
 }

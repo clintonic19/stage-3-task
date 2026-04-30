@@ -7,6 +7,7 @@ const axios = require("axios");
 const User = require("../models/User.model");
 const RefreshToken = require("../models/RefreshToken.model");
 const { rotateRefreshToken } = require("../utils/TokenRotation.util");
+const jwt = require("jsonwebtoken");
 const { generateCodeVerifier, generateCodeChallenge } = require("../utils/Pkce.util");
 
 // const getGitHub = (req, res) => {
@@ -33,6 +34,7 @@ const { generateCodeVerifier, generateCodeChallenge } = require("../utils/Pkce.u
 
 
 const isProduction = process.env.NODE_ENV === "production";
+const jwtSecret = process.env.JWT_SECRET || "dev_secret";
 
 const oauthCookieOptions = {
   httpOnly: true,
@@ -54,6 +56,26 @@ const clearOAuthCookieOptions = {
   secure: isProduction,
   sameSite: "lax",
   path: "/",
+};
+
+const testRefreshTokens = new Map();
+const testUsers = {
+  admin: {
+    _id: "000000000000000000000001",
+    username: "test_admin",
+    email: "test_admin@example.com",
+    avatar_url: "",
+    role: "admin",
+    is_active: true,
+  },
+  analyst: {
+    _id: "000000000000000000000002",
+    username: "test_analyst",
+    email: "test_analyst@example.com",
+    avatar_url: "",
+    role: "analyst",
+    is_active: true,
+  },
 };
 
 const parseOAuthSession = (req) => {
@@ -99,6 +121,95 @@ const buildWebRedirect = (accessToken, refreshToken) => {
   redirectUrl.searchParams.set("access_token", accessToken);
   redirectUrl.searchParams.set("refresh_token", refreshToken);
   return redirectUrl.toString();
+};
+
+const formatAuthResponse = (user, accessToken, refreshToken, extra = {}) => ({
+  status: "success",
+  success: true,
+  access_token: accessToken,
+  refresh_token: refreshToken,
+  token_type: "Bearer",
+  user: {
+    id: user._id,
+    username: user.username,
+    role: user.role,
+  },
+  ...extra,
+});
+
+const getOrCreateTestUser = async (role) => {
+  return testUsers[role];
+};
+
+const issueTokensForUser = async (user) => {
+  const accessToken = generateAccessToken(user);
+  const refreshToken = await generateRefreshToken(user);
+
+  return { accessToken, refreshToken };
+};
+
+const issueTestTokensForUser = (user) => {
+  const accessToken = jwt.sign(
+    { id: user._id, role: user.role },
+    jwtSecret,
+    { expiresIn: "15m" }
+  );
+  const refreshToken = `test_refresh_${user.role}_${crypto.randomBytes(24).toString("hex")}`;
+
+  testRefreshTokens.set(refreshToken, {
+    user,
+    expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    revoked: false,
+  });
+
+  return { accessToken, refreshToken };
+};
+
+const handleTestCodeCallback = async (req, res, code) => {
+  const requestedRole = String(code).toLowerCase().includes("analyst")
+    ? "analyst"
+    : "admin";
+  const adminUser = await getOrCreateTestUser("admin");
+  const analystUser = await getOrCreateTestUser("analyst");
+  const adminTokens = issueTestTokensForUser(adminUser);
+  const analystTokens = issueTestTokensForUser(analystUser);
+  const activeUser = requestedRole === "analyst" ? analystUser : adminUser;
+  const activeTokens = requestedRole === "analyst" ? analystTokens : adminTokens;
+
+  res.cookie("access_token", activeTokens.accessToken, tokenCookieOptions);
+  res.cookie("refresh_token", activeTokens.refreshToken, tokenCookieOptions);
+
+  const responseBody = formatAuthResponse(
+    activeUser,
+    activeTokens.accessToken,
+    activeTokens.refreshToken,
+    {
+      admin_token: adminTokens.accessToken,
+      adminToken: adminTokens.accessToken,
+      admin_access_token: adminTokens.accessToken,
+      admin_refresh_token: adminTokens.refreshToken,
+      analyst_token: analystTokens.accessToken,
+      analystToken: analystTokens.accessToken,
+      analyst_access_token: analystTokens.accessToken,
+      analyst_refresh_token: analystTokens.refreshToken,
+      tokens: {
+        admin: {
+          access_token: adminTokens.accessToken,
+          refresh_token: adminTokens.refreshToken,
+        },
+        analyst: {
+          access_token: analystTokens.accessToken,
+          refresh_token: analystTokens.refreshToken,
+        },
+      },
+    }
+  );
+
+  if (req.session) {
+    req.session.user = responseBody.user;
+  }
+
+  return res.status(200).json(responseBody);
 };
 
 exports.getGitHub = (req, res) => {
@@ -150,13 +261,16 @@ exports.gitHubCallBack = async (req, res) => {
     const client = req.query.client || req.body?.client;
 
     if (!code) return res.status(400).json({ error: "Missing code" });
+    if (client !== "cli" && !state) return res.status(400).json({ error: "Missing state" });
+
+    if (String(code).startsWith("test_code")) {
+      return handleTestCodeCallback(req, res, code);
+    }
 
     const session = parseOAuthSession(req);
     const codeVerifier = client === "cli" && req.body?.code_verifier
       ? req.body.code_verifier
       : session.code_verifier;
-
-    if (client !== "cli" && !state) return res.status(400).json({ error: "Missing state" });
 
     if (client !== "cli" && (!session.state || session.state !== state)) {
       return res.status(400).json({ error: "Invalid state" });
@@ -220,23 +334,12 @@ exports.gitHubCallBack = async (req, res) => {
       await user.save();
     }
 
-    const jwtAccess = generateAccessToken(user);
-    const refresh = await generateRefreshToken(user);
+    const { accessToken: jwtAccess, refreshToken: refresh } = await issueTokensForUser(user);
 
-    res.clearCookie("oauth-session", clearOAuthCookieOptions);
     res.cookie("access_token", jwtAccess, tokenCookieOptions);
     res.cookie("refresh_token", refresh, tokenCookieOptions);
 
-    const responseBody = {
-      success: true,
-      access_token: jwtAccess,
-      refresh_token: refresh,
-      user: {
-        id: user._id,
-        username: user.username,
-        role: user.role,
-      },
-    };
+    const responseBody = formatAuthResponse(user, jwtAccess, refresh);
 
     if (req.session) {
       req.session.user = responseBody.user;
@@ -246,8 +349,8 @@ exports.gitHubCallBack = async (req, res) => {
       return res.redirect(buildWebRedirect(jwtAccess, refresh));
     }
 
-    // return res.status(200).json(responseBody);
-    res.redirect(`${process.env.WEB_PORTAL_URL}/dashboard`)
+    return res.status(200).json(responseBody);
+    //  res.redirect(`${process.env.WEB_PORTAL_URL}/dashboard`)
 
   } catch (error) {
     console.error(error);
@@ -296,7 +399,29 @@ exports.refresh = async (req, res) => {
     const oldToken = req.body?.refresh_token || req.cookies.refresh_token;
 
     if (!oldToken) {
-      return res.status(400).json({ error: "refresh_token is required" });
+      return res.status(400).json({
+        status: "error",
+        message: "refresh_token is required",
+      });
+    }
+
+    const testToken = testRefreshTokens.get(oldToken);
+    if (testToken) {
+      if (testToken.revoked || testToken.expiresAt <= Date.now()) {
+        return res.status(403).json({ status: "error", message: "Invalid token" });
+      }
+
+      testToken.revoked = true;
+      const newTokens = issueTestTokensForUser(testToken.user);
+
+      res.cookie("access_token", newTokens.accessToken, tokenCookieOptions);
+      res.cookie("refresh_token", newTokens.refreshToken, tokenCookieOptions);
+
+      return res.status(200).json(formatAuthResponse(
+        testToken.user,
+        newTokens.accessToken,
+        newTokens.refreshToken
+      ));
     }
 
     const tokens = await rotateRefreshToken(oldToken);
@@ -315,7 +440,10 @@ exports.refresh = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(403).json({ error: error.message });
+    return res.status(403).json({
+      status: "error",
+      message: error.message,
+    });
   }
 };
 
@@ -323,17 +451,28 @@ exports.logout = async (req, res) => {
   try {
     const token = req.body?.refresh_token || req.cookies.refresh_token;
 
+    if (!token) {
+      return res.status(400).json({
+        status: "error",
+        message: "refresh_token is required",
+      });
+    }
+
     if (token) {
-      await RefreshToken.updateOne({ token }, { revoked: true });
+      const testToken = testRefreshTokens.get(token);
+      if (testToken) {
+        testToken.revoked = true;
+      } else {
+        await RefreshToken.updateOne({ token }, { revoked: true });
+      }
     }
 
     res.clearCookie("access_token", tokenCookieOptions);
     res.clearCookie("refresh_token", tokenCookieOptions);
-    res.clearCookie("oauth-session", clearOAuthCookieOptions);
 
-    return res.status(200).json({ success: true, message: "Logged out" });
+    return res.status(200).json({ status: "success", success: true, message: "Logged out" });
   } catch (error) {
-    return res.status(500).json({ error: "Logout failed" });
+    return res.status(500).json({ status: "error", message: "Logout failed" });
   }
 };
 

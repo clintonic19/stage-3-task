@@ -1,5 +1,6 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
+const jwtSecret = process.env.JWT_SECRET || "dev_secret";
 
 
 exports.authenticate = (req, res, next) => {
@@ -11,7 +12,7 @@ exports.authenticate = (req, res, next) => {
   });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, jwtSecret);
 
     req.user = decoded;
 

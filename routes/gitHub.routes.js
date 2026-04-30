@@ -16,10 +16,10 @@ router.get("/auth/verify", verifyUser);
 router.post("/auth/refresh", refresh);
 router.post("/auth/logout", logout);
 router.all("/auth/refresh", (req, res) => {
-  res.status(405).json({ error: "Method not allowed" });
+  res.status(405).json({ status: "error", message: "Method not allowed" });
 });
 router.all("/auth/logout", (req, res) => {
-  res.status(405).json({ error: "Method not allowed" });
+  res.status(405).json({ status: "error", message: "Method not allowed" });
 });
 
 // router.get("/auth/verify", (req, res) => {
