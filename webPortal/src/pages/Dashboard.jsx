@@ -81,11 +81,11 @@ const Dashboard = () => {
               {recentActivity.map((activity, index) => (
                 <div key={index} className="flex items-center justify-between py-2 border-b">
                   <div>
-                    <p className="text-sm font-medium text-gray-900">{activity.action}</p>
-                    <p className="text-xs text-gray-500">{activity.user}</p>
+                    <p className="text-sm font-medium text-gray-900">{activity?.action}</p>
+                    <p className="text-xs text-gray-500">{activity?.user}</p>
                   </div>
                   <span className="text-xs text-gray-400">
-                    {new Date(activity.timestamp).toLocaleTimeString()}
+                    {new Date(activity?.timestamp).toLocaleTimeString()}
                   </span>
                 </div>
               ))}

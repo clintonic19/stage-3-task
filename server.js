@@ -7,6 +7,8 @@ const cookie = require("cookie-parser");
 const morgan = require("morgan");
 const { authLimiter, apiLimiter } = require("./middlewares/rateLimiter");
 const session = require("express-session");
+const { authenticate } = require("./middlewares/auth.middleware");
+const User = require("./models/User.model");
 
 const app = express();
 
@@ -40,14 +42,11 @@ app.use(express.json());
 app.use(morgan("dev"));
 app.use(cookie());
 
-// app.use(authLimiter)
-// app.use(apiLimiter)
-
 app.use(session({
-  name: "oauth-session",
+  name: "app-session",
   secret: process.env.JWT_SECRET || "dev_secret", // use env in production
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,
   cookie: {
     httpOnly: true,
     secure: false, // true in production (HTTPS)
@@ -57,8 +56,29 @@ app.use(session({
 
 
 app.use("/api", getProfileRoute);
+app.use("/api/v1", getProfileRoute);
 app.use("/api", require("./routes/gitHub.routes"));
+app.use("/api/v1", require("./routes/gitHub.routes"));
+app.use("/", require("./routes/gitHub.routes"));
 app.use("/api/auth", require("./routes/device.routes"))
+app.use("/api/v1/auth", require("./routes/device.routes"))
+
+const getCurrentUser = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select("username email avatar_url role is_active last_login_at").lean();
+
+    if (!user) {
+      return res.status(404).json({ status: "error", message: "User not found" });
+    }
+
+    return res.status(200).json({ status: "success", data: user });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+app.get("/api/users/me", authenticate, getCurrentUser);
+app.get("/api/v1/users/me", authenticate, getCurrentUser);
 
 app.get("/api/health", (req, res) => {
   res.status(200).json({

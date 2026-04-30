@@ -14,14 +14,14 @@ const { authorize } = require("../middlewares/Rbac.middleware");
 
 // router.get("/profiles",  validateQuery, getProfiles);
 
-router.get("/profiles", authenticate, authorize("admin"), validateQuery, getProfiles);
+router.get("/profiles", authenticate, authorize(["admin", "analyst"]), validateQuery, getProfiles);
 
-router.get("/profiles/search", authenticate,  validateQuery, searchProfiles);
+router.get("/profiles/search", authenticate, authorize(["admin", "analyst"]), validateQuery, searchProfiles);
 
 router.post("/profiles", authenticate, authorize("admin"), createProfile);
 
-router.get("/profiles/:id", authenticate,  getProfileById);
+router.get("/profiles/:id", authenticate, authorize(["admin", "analyst"]), getProfileById);
 
-router.delete("/profiles/:id", authenticate,  deleteProfile);
+router.delete("/profiles/:id", authenticate, authorize("admin"), deleteProfile);
 
 module.exports = router;

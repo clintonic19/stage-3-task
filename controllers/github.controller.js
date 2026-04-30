@@ -1,9 +1,12 @@
 const express = require("express");
 const cookie = require("cookie-parser");
+const crypto = require("crypto");
 const { generateAccessToken,
   generateRefreshToken } = require("../services/RefreshToken.service");
 const axios = require("axios");
 const User = require("../models/User.model");
+const RefreshToken = require("../models/RefreshToken.model");
+const { rotateRefreshToken } = require("../utils/TokenRotation.util");
 const { generateCodeVerifier, generateCodeChallenge } = require("../utils/Pkce.util");
 
 // const getGitHub = (req, res) => {
@@ -29,30 +32,107 @@ const { generateCodeVerifier, generateCodeChallenge } = require("../utils/Pkce.u
 // };
 
 
+const isProduction = process.env.NODE_ENV === "production";
+
+const oauthCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: "lax",
+  maxAge: 10 * 60 * 1000,
+  path: "/",
+};
+
+const tokenCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: "lax",
+  path: "/",
+};
+
+const clearOAuthCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: "lax",
+  path: "/",
+};
+
+const parseOAuthSession = (req) => {
+  try {
+    return JSON.parse(req.cookies["oauth-session"] || "{}");
+  } catch {
+    return {};
+  }
+};
+
+const resolveRole = (githubUser) => {
+  if (["admin", "analyst"].includes(githubUser.role)) {
+    return githubUser.role;
+  }
+
+  const adminLogins = (process.env.ADMIN_GITHUB_USERNAMES || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const adminIds = (process.env.ADMIN_GITHUB_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (
+    adminLogins.includes(String(githubUser.login || "").toLowerCase()) ||
+    adminIds.includes(String(githubUser.id))
+  ) {
+    return "admin";
+  }
+
+  return "analyst";
+};
+
+const buildWebRedirect = (accessToken, refreshToken) => {
+  const baseUrl = process.env.WEB_PORTAL_URL;
+
+  if (!baseUrl) {
+    return `/dashboard?access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`;
+  }
+
+  const redirectUrl = new URL("/dashboard", baseUrl);
+  redirectUrl.searchParams.set("access_token", accessToken);
+  redirectUrl.searchParams.set("refresh_token", refreshToken);
+  return redirectUrl.toString();
+};
+
 exports.getGitHub = (req, res) => {
   try {
-    const verifier = generateCodeVerifier();
-    const challenge = generateCodeChallenge(verifier);
+    const state = req.query.state || crypto.randomBytes(16).toString("hex");
+    const codeVerifier = crypto.randomBytes(32).toString("hex");
+    const codeChallenge = req.query.code_challenge || crypto
+      .createHash("sha256")
+      .update(codeVerifier)
+      .digest("base64url");
 
-    if (!req.session) {
-      throw new Error("Session middleware not configured");
-    }
-    // store verifier temporarily (Redis or memory for now)
-    req.session.code_verifier = verifier;
+    res.cookie(
+      "oauth-session",
+      JSON.stringify({
+        state,
+        code_verifier: codeVerifier,
+        client: req.query.client || "web",
+      }),
+      oauthCookieOptions
+    );
 
     const params = new URLSearchParams({
       client_id: process.env.GITHUB_CLIENT_ID,
-      code_challenge: challenge,
-      code_challenge_method: "S256"
+      scope: "read:user user:email",
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
     });
 
-    const githubUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
+    if (process.env.REDIRECT_URI) {
+      params.set("redirect_uri", process.env.REDIRECT_URI);
+    }
 
-    // const githubUrl = `https://github.com/login/oauth/authorize
-    // ?client_id=${process.env.GITHUB_CLIENT_ID}
-    // &code_challenge=${challenge}&code_challenge_method=S256`;
-
-    res.redirect(githubUrl);
+    res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
 
   } catch (error) {
     console.error(error);
@@ -65,29 +145,47 @@ exports.getGitHub = (req, res) => {
 
 exports.gitHubCallBack = async (req, res) => {
   try {
-    //  const { code } = req.query;
-    const code = req.query.code;
+    const code = req.query.code || req.body?.code;
+    const state = req.query.state || req.body?.state;
+    const client = req.query.client || req.body?.client;
 
-    // if (!code) {
-    //   return res.status(400).json({ error: "No code provided" });
-    // }
+    if (!code) return res.status(400).json({ error: "Missing code" });
 
-    // if (!req.session?.code_verifier) {
-    //   return res.status(400).json({ error: "Missing code_verifier" });
-    // }
+    const session = parseOAuthSession(req);
+    const codeVerifier = client === "cli" && req.body?.code_verifier
+      ? req.body.code_verifier
+      : session.code_verifier;
+
+    if (client !== "cli" && !state) return res.status(400).json({ error: "Missing state" });
+
+    if (client !== "cli" && (!session.state || session.state !== state)) {
+      return res.status(400).json({ error: "Invalid state" });
+    }
+
+    if (!codeVerifier) return res.status(400).json({ error: "Missing code_verifier" });
+
+    const tokenPayload = {
+      client_id: process.env.GITHUB_CLIENT_ID,
+      client_secret: process.env.GITHUB_CLIENT_SECRET,
+      code,
+      code_verifier: codeVerifier
+    };
+
+    if (process.env.REDIRECT_URI) {
+      tokenPayload.redirect_uri = process.env.REDIRECT_URI;
+    }
 
     const tokenRes = await axios.post(
       "https://github.com/login/oauth/access_token",
-      {
-        client_id: process.env.GITHUB_CLIENT_ID,
-        client_secret: process.env.GITHUB_CLIENT_SECRET,
-        code,
-        code_verifier: req.session.code_verifier
-      },
+      tokenPayload,
       { headers: { Accept: "application/json" } }
     );
-    console.log("VERIFIER:", req.session.code_verifier);
+
     const accessToken = tokenRes.data.access_token;
+
+    if (!accessToken || tokenRes.data.error) {
+      return res.status(400).json({ error: tokenRes.data.error || "Invalid code" });
+    }
 
     const userRes = await axios.get("https://api.github.com/user", {
       headers: { Authorization: `Bearer ${accessToken}` }
@@ -103,37 +201,63 @@ exports.gitHubCallBack = async (req, res) => {
 
     let user = await User.findOne({ githubId: githubUser.id });
 
+    const role = resolveRole(githubUser);
+
     if (!user) {
       user = await User.create({
         githubId: githubUser.id,
         username: githubUser.login,
         avatar_url: githubUser.avatar_url,
-        provider: "github"
+        email: githubUser.email,
+        role,
       });
+    } else {
+      user.username = githubUser.login || user.username;
+      user.avatar_url = githubUser.avatar_url || user.avatar_url;
+      user.email = githubUser.email || user.email;
+      user.role = role === "admin" ? "admin" : user.role || role;
+      user.last_login_at = new Date();
+      await user.save();
     }
-    console.log("Authenticated user:", user);
 
-    // Issue tokens
     const jwtAccess = generateAccessToken(user);
     const refresh = await generateRefreshToken(user);
 
-        res.cookie("access_token", jwtAccess, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: false
-      });
+    res.clearCookie("oauth-session", clearOAuthCookieOptions);
+    res.cookie("access_token", jwtAccess, tokenCookieOptions);
+    res.cookie("refresh_token", refresh, tokenCookieOptions);
 
-      res.cookie("refresh_token", refresh, {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: false
-      });
+    const responseBody = {
+      success: true,
+      access_token: jwtAccess,
+      refresh_token: refresh,
+      user: {
+        id: user._id,
+        username: user.username,
+        role: user.role,
+      },
+    };
 
-    // res.json({ access_token: jwtAccess, refresh_token: refresh });
+    if (req.session) {
+      req.session.user = responseBody.user;
+    }
+
+    if (session.client === "web" && req.accepts("html") && !req.accepts("json")) {
+      return res.redirect(buildWebRedirect(jwtAccess, refresh));
+    }
+
+    // return res.status(200).json(responseBody);
     res.redirect(`${process.env.WEB_PORTAL_URL}/dashboard`)
 
   } catch (error) {
     console.error(error);
+    if (error.response) {
+      return res.status(400).json({
+        error: "Invalid code",
+        error_details: error.response.data,
+      });
+    }
+
     res.status(500).json({
       error: "Failed to handle GitHub callback",
       error_details: error.response?.data || error.message
@@ -165,6 +289,52 @@ exports.verifyUser = (req, res) => {
   });
   
  }
+};
+
+exports.refresh = async (req, res) => {
+  try {
+    const oldToken = req.body?.refresh_token || req.cookies.refresh_token;
+
+    if (!oldToken) {
+      return res.status(400).json({ error: "refresh_token is required" });
+    }
+
+    const tokens = await rotateRefreshToken(oldToken);
+
+    res.cookie("access_token", tokens.access_token, tokenCookieOptions);
+    res.cookie("refresh_token", tokens.refresh_token, tokenCookieOptions);
+
+    return res.status(200).json({
+      success: true,
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      user: {
+        id: tokens.user._id,
+        username: tokens.user.username,
+        role: tokens.user.role,
+      },
+    });
+  } catch (error) {
+    return res.status(403).json({ error: error.message });
+  }
+};
+
+exports.logout = async (req, res) => {
+  try {
+    const token = req.body?.refresh_token || req.cookies.refresh_token;
+
+    if (token) {
+      await RefreshToken.updateOne({ token }, { revoked: true });
+    }
+
+    res.clearCookie("access_token", tokenCookieOptions);
+    res.clearCookie("refresh_token", tokenCookieOptions);
+    res.clearCookie("oauth-session", clearOAuthCookieOptions);
+
+    return res.status(200).json({ success: true, message: "Logged out" });
+  } catch (error) {
+    return res.status(500).json({ error: "Logout failed" });
+  }
 };
 
 // module.exports = getGitHub;

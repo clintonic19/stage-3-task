@@ -1,6 +1,6 @@
 const express = require("express");
 const RefreshToken  = require("../models/RefreshToken.model");
-const { default: UserModel } = require("../models/User.model");
+const UserModel = require("../models/User.model");
 const { generateAccessToken, generateRefreshToken, generateTokens } = require("../services/RefreshToken.service");
 
 // exports.refreshToken = async (req, res) => {
@@ -31,25 +31,29 @@ const { generateAccessToken, generateRefreshToken, generateTokens } = require(".
 // Rotate refresh token
 exports.rotateRefreshToken = async(oldToken) => {
   try {
-    // Find the token in the database
     const token = await RefreshToken.findOne({ token: oldToken, revoked: false });
 
-  if (!token) throw new Error("Invalid token");
+    if (!token || token.expiresAt <= new Date()) {
+      throw new Error("Invalid token");
+    }
 
-  token.revoked = true;
+    token.revoked = true;
   
-  await token.save(); // Mark the old token as revoked
+    await token.save();
 
-  // Generate new access and refresh tokens for the user associated with the old token
-  return generateTokens(token.user); 
+    const user = await UserModel.findById(token.userId);
+
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    return {
+      access_token: generateAccessToken(user),
+      refresh_token: await generateRefreshToken(user),
+      user,
+    };
 
   } catch (error) {
-    throw new Error(error.message);
-  
-    throw new Error(error.message);  
-    res.status(403).json({ 
-      status: false,
-      error: error.message
-    });
+    throw new Error(error.message); 
   }
 }
